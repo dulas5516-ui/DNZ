@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>DNZ Cyber Runner: Master</title>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser-arcade-physics.min.js"></script>
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        canvas { border: 2px solid #0ff; box-shadow: 0 0 25px #0ff; border-radius: 10px; }
+    </style>
+</head>
+<body>
+<script>
+    const config = {
+        type: Phaser.AUTO,
+        width: 360,
+        height: 640,
+        physics: { default: 'arcade', arcade: { gravity: { y: 0 } } },
+        scene: { preload: preload, create: create, update: update }
+    };
+
+    let player, obstacles, coins, scoreText, coinText, missionText, playerGlow;
+    let score = 0, gameSpeed = 320, currentLane = 1, isGameOver = false, isShopOpen = false;
+    let lanes = [60, 180, 300];
+    
+    // HAFIZA
+    let coinScore = parseInt(localStorage.getItem('savedCoins')) || 0;
+    let unlockedSkins = JSON.parse(localStorage.getItem('unlockedSkins')) || [true, false, false, false, false, false, false];
+    let currentSkin = parseInt(localStorage.getItem('activeSkin')) || 0;
+    let highScores = JSON.parse(localStorage.getItem('highScores')) || [0, 0, 0, 0, 0];
+
+    // GÖREVLER (Maks 50 Jeton / 500 Metre)
+    let missionType = localStorage.getItem('missionType') || 'coin';
+    let missionGoal = parseInt(localStorage.getItem('missionGoal')) || 10;
+    let missionProgress = parseInt(localStorage.getItem('missionProgress')) || 0;
+
+    const skinColors = [0x00ffff, 0xffd700, 0xff00ff, 0xffffff, 0xff0000, 0x00ff00, 0x1a237e];
+    const skinNames = ["Klasik", "Altin", "Neon", "PARLAK 💎", "Vampire 🔥", "Hacker 💻", "Galaxy 🌌"];
+    const skinCosts = [0, 50, 100, 500, 500, 500, 500];
+
+    let shopContainer, statusText;
+
+    // SES ÜRETİCİ
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playTone(freq, type, duration) {
+        if (audioCtx.state === 'suspended') return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+
+    new Phaser.Game(config);
+    function preload() {}
+
+    function create() {
+        this.add.grid(180, 320, 360, 640, 40, 40, 0, 0, 0x00ffff, 0.1);
+
+        playerGlow = this.add.circle(lanes[currentLane], 550, 45, 0xffffff, 0.3).setVisible(currentSkin >= 3);
+        player = this.add.triangle(lanes[currentLane], 550, 0, 40, 20, 0, 40, 40, skinColors[currentSkin]);
+        this.physics.add.existing(player);
+
+        obstacles = this.physics.add.group();
+        coins = this.physics.add.group();
+
+        // ARAYÜZ
+        scoreText = this.add.text(10, 15, 'METRE: 0', { fontSize: '15px', fill: '#0ff' });
+        coinText = this.add.text(10, 35, 'JETON: ' + coinScore, { fontSize: '15px', fill: '#ffd700' });
+        
+        // GÖREV PANELİ (Sol Üst Köşe)
+        this.add.rectangle(260, 40, 180, 55, 0x00ffff, 0.1).setStrokeStyle(1, 0x00ffff);
+        missionText = this.add.text(180, 25, '', { fontSize: '11px', fill: '#fff', align: 'center' });
+        updateMissionUI();
+
+        // DÜKKAN BUTONU
+        let shopBtn = this.add.rectangle(180, 600, 140, 45, 0x333333).setInteractive();
+        shopBtn.setStrokeStyle(2, 0x00ffff);
+        this.add.text(145, 590, 'DÜKKAN', { fontSize: '18px', fill: '#fff' });
+        shopBtn.on('pointerdown', () => { 
+            if(!isGameOver) { isShopOpen = true; this.physics.pause(); shopContainer.setVisible(true); playTone(440, 'sine', 0.1); }
+        });
+
+        createShopUI.call(this);
+
+        this.input.on('pointerdown', (p) => {
+            if (isShopOpen || p.y > 550) return;
+            if (isGameOver) { location.reload(); return; }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            if (p.x < 180 && currentLane > 0) currentLane--;
+            else if (p.x >= 180 && currentLane < 2) currentLane++;
+            playTone(600, 'square', 0.05);
+            this.tweens.add({ targets: [player, playerGlow], x: lanes[currentLane], duration: 100 });
+        });
+
+        this.physics.add.overlap(player, obstacles, () => {
+            if(isGameOver) return;
+            handleGameOver.call(this);
+        });
+
+        this.physics.add.overlap(player, coins, (p, c) => {
+            c.destroy();
+            coinScore++;
+            if(missionType === 'coin') { missionProgress++; checkMissionComplete.call(this); }
+            playTone(1000, 'sine', 0.1);
+            coinText.setText('JETON: ' + coinScore);
+            updateMissionUI();
+        });
+
+        this.time.addEvent({ delay: 950, callback: spawnObstacle, callbackScope: this, loop: true });
+        this.time.addEvent({ delay: 2400, callback: spawnCoin, callbackScope: this, loop: true });
+    }
+
+    function updateMissionUI() {
+        let label = missionType === 'coin' ? "Topla" : "Metre Git";
+        let progress = missionType === 'coin' ? missionProgress : Math.floor(score);
+        missionText.setText(`GÖREV: ${missionGoal} ${label}\nŞU AN: ${progress}/${missionGoal}`);
+    }
+
+    function checkMissionComplete() {
+        if (missionType === 'coin' && missionProgress >= missionGoal) completeMission.call(this);
+        else if (missionType === 'distance' && score >= missionGoal) completeMission.call(this);
+    }
+
+    function completeMission() {
+        playTone(1500, 'sine', 0.4);
+        let reward = Math.min(Math.floor(missionGoal / 2), 30);
+        coinScore += reward;
+        coinText.setText('JETON: ' + coinScore);
+        
+        // Yeni Görev
+        if (Math.random() > 0.5) { missionType = 'coin'; missionGoal = Math.min(missionGoal + 5, 50); missionProgress = 0; }
+        else { missionType = 'distance'; missionGoal = Math.min(missionGoal + 100, 500); missionProgress = 0; }
+        saveData();
+        updateMissionUI();
+    }
+
+    function handleGameOver() {
+        isGameOver = true;
+        this.physics.pause();
+        playTone(150, 'sawtooth', 0.4);
+        this.cameras.main.shake(300, 0.03);
+
+        let finalScore = Math.floor(score);
+        highScores.push(finalScore);
+        highScores.sort((a, b) => b - a);
+        highScores = highScores.slice(0, 5);
+        saveData();
+
+        // LİDERLİK TABLOSU EKRANI
+        let board = this.add.container(0, 0).setDepth(500);
+        board.add(this.add.rectangle(180, 320, 310, 480, 0x000, 0.95).setStrokeStyle(3, 0xff0000));
+        board.add(this.add.text(90, 110, 'OYUN BİTTİ', { fontSize: '32px', fill: '#f00', fontWeight: 'bold' }));
+        board.add(this.add.text(110, 160, 'SKORUN: ' + finalScore, { fontSize: '20px', fill: '#fff' }));
+        board.add(this.add.text(90, 210, '--- EN İYİLER ---', { fontSize: '18px', fill: '#0ff' }));
+        
+        highScores.forEach((s, i) => {
+            board.add(this.add.text(105, 250 + (i*35), `${i+1}. ${s} Metre`, { fontSize: '18px', fill: '#ffd700' }));
+        });
+        
+        board.add(this.add.text(70, 460, 'YENİDEN BAŞLAMAK İÇİN TIKLA', { fontSize: '14px', fill: '#fff' }));
+    }
+
+    function createShopUI() {
+        shopContainer = this.add.container(0, 0).setVisible(false).setDepth(1000);
+        shopContainer.add(this.add.rectangle(180, 320, 360, 640, 0, 0.98));
+        statusText = this.add.text(80, 40, 'EFSANE MARKET', { fontSize: '28px', fill: '#0ff' });
+        shopContainer.add(statusText);
+
+        for(let i=0; i<skinNames.length; i++) {
+            let sBtn = this.add.rectangle(180, 130 + (i*60), 240, 45, 0x222222).setInteractive();
+            sBtn.setStrokeStyle(1, i >= 3 ? 0xffffff : 0x00ffff);
+            let sTxt = this.add.text(85, 120 + (i*60), unlockedSkins[i] ? skinNames[i] : skinCosts[i]+" JETON", { fontSize: '15px', fill: i >= 3 ? '#fff' : '#0ff' });
+            
+            sBtn.on('pointerdown', () => {
+                if (unlockedSkins[i]) {
+                    currentSkin = i;
+                    applySkin();
+                    statusText.setText(skinNames[i]);
+                } else if (coinScore >= skinCosts[i]) {
+                    coinScore -= skinCosts[i];
+                    coinText.setText('JETON: ' + coinScore);
+                    unlockedSkins[i] = true;
+                    currentSkin = i;
+                    applySkin();
+                    sTxt.setText(skinNames[i]);
+                    saveData();
+                } else {
+                    statusText.setText("YETERSİZ JETON!");
+                }
+            });
+            shopContainer.add([sBtn, sTxt]);
+        }
+        let cBtn = this.add.rectangle(180, 580, 120, 40, 0xff0000).setInteractive();
+        shopContainer.add([cBtn, this.add.text(152, 570, 'KAPAT')]);
+        cBtn.on('pointerdown', () => { isShopOpen = false; this.physics.resume(); shopContainer.setVisible(false); });
+    }
+
+    function applySkin() {
+        player.setFillStyle(skinColors[currentSkin]);
+        playerGlow.setVisible(currentSkin >= 3);
+        if(currentSkin >= 3) player.setStrokeStyle(3, 0xffffff); else player.setStrokeStyle(0);
+        saveData();
+    }
+
+    function saveData() {
+        localStorage.setItem('savedCoins', coinScore);
+        localStorage.setItem('unlockedSkins', JSON.stringify(unlockedSkins));
+        localStorage.setItem('activeSkin', currentSkin);
+        localStorage.setItem('highScores', JSON.stringify(highScores));
+        localStorage.setItem('missionType', missionType);
+        localStorage.setItem('missionGoal', missionGoal);
+        localStorage.setItem('missionProgress', missionProgress);
+    }
+
+    function spawnObstacle() {
+        if (isGameOver || isShopOpen) return;
+        let obs = this.add.rectangle(lanes[Phaser.Math.Between(0, 2)], -50, 70, 40, 0xff0055).setStrokeStyle(1, 0x00ffff);
+        this.physics.add.existing(obs);
+        obstacles.add(obs);
+        obs.body.setVelocityY(gameSpeed);
+        gameSpeed += 0.4;
+    }
+
+    function spawnCoin() {
+        if (isGameOver || isShopOpen) return;
+        let c = this.add.circle(lanes[Phaser.Math.Between(0, 2)], -50, 15, 0xffd700).setStrokeStyle(1, 0xffffff);
+        this.physics.add.existing(c);
+        coins.add(c);
+        c.body.setVelocityY(gameSpeed);
+    }
+
+    function update() {
+        if (isGameOver || isShopOpen) return;
+        score += 0.1;
+        scoreText.setText('METRE: ' + Math.floor(score));
+        if(missionType === 'distance') { checkMissionComplete.call(this); updateMissionUI(); }
+        obstacles.getChildren().forEach(o => { if(o.y > 700) o.destroy(); });
+        coins.getChildren().forEach(c => { if(c.y > 700) c.destroy(); });
+    }
+</script>
+</body>
+</html>
+                
